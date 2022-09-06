@@ -15,8 +15,8 @@ mod text;
 pub use completion::Completion;
 pub use editor::EditorView;
 pub use markdown::Markdown;
-pub use menu::Menu;
-pub use picker::{FileLocation, FilePicker, Picker};
+pub use menu::{DirEntry, Menu};
+pub use picker::{FileFinder, FileLocation, FilePicker, Picker};
 pub use popup::Popup;
 pub use prompt::{Prompt, PromptEvent};
 pub use spinner::{ProgressSpinners, Spinner};
@@ -197,6 +197,42 @@ pub fn file_picker(root: PathBuf, config: &helix_view::editor::Config) -> FilePi
             }
         },
         |_editor, path| Some((path.clone(), None)),
+    )
+}
+
+pub fn file_finder(root: PathBuf, _config: &helix_view::editor::Config) -> FileFinder<DirEntry> {
+    use std::time::Instant;
+
+    let now = Instant::now();
+
+    let mut files: Vec<DirEntry> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .flat_map(|d| TryFrom::try_from(d))
+        .collect();
+    files.sort_unstable_by(|a, b| {
+        b.metadata
+            .is_dir()
+            .cmp(&a.metadata.is_dir())
+            .then(a.path.cmp(&b.path))
+    });
+
+    log::debug!("file_finder init {:?}", Instant::now().duration_since(now));
+
+    FileFinder::new(
+        files,
+        root,
+        move |cx, direntry, action| {
+            if let Err(e) = cx.editor.open(&direntry.path, action) {
+                let err = if let Some(err) = e.source() {
+                    format!("{}", err)
+                } else {
+                    format!("unable to open \"{}\"", direntry.path.display())
+                };
+                cx.editor.set_error(err);
+            }
+        },
+        |_editor, direntry| Some((direntry.path.clone(), None)),
     )
 }
 

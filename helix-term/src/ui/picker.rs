@@ -47,8 +47,19 @@ pub struct FilePicker<T: Item> {
     file_fn: Box<dyn Fn(&Editor, &T) -> Option<FileLocation>>,
 }
 
+pub struct FileFinder<T: Item> {
+    picker: Picker<T>,
+    pub truncate_start: bool,
+    /// Caches paths to documents
+    preview_cache: HashMap<PathBuf, CachedPreview>,
+    read_buffer: Vec<u8>,
+    /// Given an item in the picker, return the file path and line number to display.
+    file_fn: Box<dyn Fn(&Editor, &T) -> Option<FileLocation>>,
+}
+
 pub enum CachedPreview {
     Document(Box<Document>),
+    Directory(Vec<PathBuf>),
     Binary,
     LargeFile,
     NotFound,
@@ -76,6 +87,7 @@ impl Preview<'_, '_> {
             Self::EditorDocument(_) => "<File preview>",
             Self::Cached(preview) => match preview {
                 CachedPreview::Document(_) => "<File preview>",
+                CachedPreview::Directory(_) => "<Directory preview>",
                 CachedPreview::Binary => "<Binary file>",
                 CachedPreview::LargeFile => "<File too large to preview>",
                 CachedPreview::NotFound => "<File not found>",
@@ -136,6 +148,15 @@ impl<T: Item> FilePicker<T> {
             return Preview::Cached(&self.preview_cache[path]);
         }
 
+        if path.is_dir() {
+            let entries = match std::fs::read_dir(path) {
+                Ok(readdir) => readdir.flatten().map(|d| d.path()).collect(),
+                Err(_) => vec![],
+            };
+            let preview = CachedPreview::Directory(entries);
+            self.preview_cache.insert(path.to_owned(), preview);
+            return Preview::Cached(&self.preview_cache[path]);
+        }
         let data = std::fs::File::open(path).and_then(|file| {
             let metadata = file.metadata()?;
             // Read up to 1kb to detect the content type
@@ -261,6 +282,236 @@ impl<T: Item + 'static> Component for FilePicker<T> {
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> EventResult {
+        // TODO: keybinds for scrolling preview
+        self.picker.handle_event(event, ctx)
+    }
+
+    fn cursor(&self, area: Rect, ctx: &Editor) -> (Option<Position>, CursorKind) {
+        self.picker.cursor(area, ctx)
+    }
+
+    fn required_size(&mut self, (width, height): (u16, u16)) -> Option<(u16, u16)> {
+        let picker_width = if width > MIN_AREA_WIDTH_FOR_PREVIEW {
+            width / 2
+        } else {
+            width
+        };
+        self.picker.required_size((picker_width, height))?;
+        Some((width, height))
+    }
+}
+
+impl<T: Item> FileFinder<T> {
+    pub fn new(
+        options: Vec<T>,
+        editor_data: T::Data,
+        callback_fn: impl Fn(&mut Context, &T, Action) + 'static,
+        preview_fn: impl Fn(&Editor, &T) -> Option<FileLocation> + 'static,
+    ) -> Self {
+        let truncate_start = true;
+        let mut picker = Picker::new(options, editor_data, callback_fn);
+        picker.truncate_start = truncate_start;
+
+        Self {
+            picker,
+            truncate_start,
+            preview_cache: HashMap::new(),
+            read_buffer: Vec::with_capacity(1024),
+            file_fn: Box::new(preview_fn),
+        }
+    }
+
+    pub fn truncate_start(mut self, truncate_start: bool) -> Self {
+        self.truncate_start = truncate_start;
+        self.picker.truncate_start = truncate_start;
+        self
+    }
+
+    fn current_file(&self, editor: &Editor) -> Option<FileLocation> {
+        self.picker
+            .selection()
+            .and_then(|current| (self.file_fn)(editor, current))
+            .and_then(|(path, line)| {
+                helix_core::path::get_canonicalized_path(&path)
+                    .ok()
+                    .zip(Some(line))
+            })
+    }
+
+    /// Get (cached) preview for a given path. If a document corresponding
+    /// to the path is already open in the editor, it is used instead.
+    fn get_preview<'picker, 'editor>(
+        &'picker mut self,
+        path: &Path,
+        editor: &'editor Editor,
+    ) -> Preview<'picker, 'editor> {
+        if let Some(doc) = editor.document_by_path(path) {
+            return Preview::EditorDocument(doc);
+        }
+
+        if self.preview_cache.contains_key(path) {
+            return Preview::Cached(&self.preview_cache[path]);
+        }
+
+        if path.is_dir() {
+            let entries = match std::fs::read_dir(path) {
+                Ok(readdir) => readdir.flatten().map(|d| d.path()).collect(),
+                Err(_) => vec![],
+            };
+            let preview = CachedPreview::Directory(entries);
+            self.preview_cache.insert(path.to_owned(), preview);
+            return Preview::Cached(&self.preview_cache[path]);
+        }
+        let data = std::fs::File::open(path).and_then(|file| {
+            let metadata = file.metadata()?;
+            // Read up to 1kb to detect the content type
+            let n = file.take(1024).read_to_end(&mut self.read_buffer)?;
+            let content_type = content_inspector::inspect(&self.read_buffer[..n]);
+            self.read_buffer.clear();
+            Ok((metadata, content_type))
+        });
+        let preview = data
+            .map(
+                |(metadata, content_type)| match (metadata.len(), content_type) {
+                    (_, content_inspector::ContentType::BINARY) => CachedPreview::Binary,
+                    (size, _) if size > MAX_FILE_SIZE_FOR_PREVIEW => CachedPreview::LargeFile,
+                    _ => {
+                        // TODO: enable syntax highlighting; blocked by async rendering
+                        Document::open(path, None, None)
+                            .map(|doc| CachedPreview::Document(Box::new(doc)))
+                            .unwrap_or(CachedPreview::NotFound)
+                    }
+                },
+            )
+            .unwrap_or(CachedPreview::NotFound);
+        self.preview_cache.insert(path.to_owned(), preview);
+        Preview::Cached(&self.preview_cache[path])
+    }
+}
+
+impl<T: Item + 'static> Component for FileFinder<T> {
+    fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
+        // +---------+ +---------+
+        // |prompt   | |preview  |
+        // +---------+ |         |
+        // |picker   | |         |
+        // |         | |         |
+        // +---------+ +---------+
+
+        let render_preview = self.picker.show_preview && area.width > MIN_AREA_WIDTH_FOR_PREVIEW;
+        // -- Render the frame:
+        // clear area
+        let background = cx.editor.theme.get("ui.background");
+        let text = cx.editor.theme.get("ui.text");
+        surface.clear_with(area, background);
+
+        let picker_width = if render_preview {
+            area.width / 2
+        } else {
+            area.width
+        };
+
+        let picker_area = area.with_width(picker_width);
+        self.picker.render(picker_area, surface, cx);
+
+        if !render_preview {
+            return;
+        }
+
+        let preview_area = area.clip_left(picker_width);
+
+        // don't like this but the lifetime sucks
+        let block = Block::default().borders(Borders::ALL);
+
+        // calculate the inner area inside the box
+        let inner = block.inner(preview_area);
+        // 1 column gap on either side
+        let margin = Margin::horizontal(1);
+        let inner = inner.inner(&margin);
+        block.render(preview_area, surface);
+
+        if let Some((path, range)) = self.current_file(cx.editor) {
+            let preview = self.get_preview(&path, cx.editor);
+            let doc = match preview {
+                Preview::Cached(CachedPreview::Directory(entries)) => {
+                    for (entry, height_offset) in entries.iter().zip(0..) {
+                        let mut label = entry
+                            .as_path()
+                            .strip_prefix(&path)
+                            .expect("strip prefix")
+                            .to_string_lossy();
+                        if entry.is_dir() {
+                            label.to_mut().push(std::path::MAIN_SEPARATOR);
+                        }
+                        surface.set_stringn(
+                            inner.x,
+                            inner.y + height_offset,
+                            label,
+                            inner.width as usize,
+                            text,
+                        );
+                    }
+                    return;
+                }
+                ref preview => match preview.document() {
+                    Some(doc) => doc,
+                    None => {
+                        let alt_text = preview.placeholder();
+                        let x = inner.x + inner.width.saturating_sub(alt_text.len() as u16) / 2;
+                        let y = inner.y + inner.height / 2;
+                        surface.set_stringn(x, y, alt_text, inner.width as usize, text);
+                        return;
+                    }
+                },
+            };
+
+            // align to middle
+            let first_line = range
+                .map(|(start, end)| {
+                    let height = end.saturating_sub(start) + 1;
+                    let middle = start + (height.saturating_sub(1) / 2);
+                    middle.saturating_sub(inner.height as usize / 2).min(start)
+                })
+                .unwrap_or(0);
+
+            let offset = Position::new(first_line, 0);
+
+            let highlights =
+                EditorView::doc_syntax_highlights(doc, offset, area.height, &cx.editor.theme);
+            EditorView::render_text_highlights(
+                doc,
+                offset,
+                inner,
+                surface,
+                &cx.editor.theme,
+                highlights,
+                &cx.editor.config(),
+            );
+
+            // highlight the line
+            if let Some((start, end)) = range {
+                let offset = start.saturating_sub(first_line) as u16;
+                surface.set_style(
+                    Rect::new(
+                        inner.x,
+                        inner.y + offset,
+                        inner.width,
+                        (end.saturating_sub(start) as u16 + 1)
+                            .min(inner.height.saturating_sub(offset)),
+                    ),
+                    cx.editor
+                        .theme
+                        .try_get("ui.highlight")
+                        .unwrap_or_else(|| cx.editor.theme.get("ui.selection")),
+                );
+            }
+        }
+    }
+
+    fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> EventResult {
+        if let Event::Key(key!(Enter)) = event {
+            let selection = self.picker.selection();
+        }
         // TODO: keybinds for scrolling preview
         self.picker.handle_event(event, ctx)
     }

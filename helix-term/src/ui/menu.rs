@@ -4,14 +4,21 @@ use crate::{
     compositor::{Callback, Component, Compositor, Context, Event, EventResult},
     ctrl, key, shift,
 };
-use tui::{buffer::Buffer as Surface, text::Spans, widgets::Table};
+use tui::{
+    buffer::Buffer as Surface,
+    text::{Span, Spans},
+    widgets::Table,
+};
 
 pub use tui::widgets::{Cell, Row};
 
 use fuzzy_matcher::skim::SkimMatcherV2 as Matcher;
 use fuzzy_matcher::FuzzyMatcher;
 
-use helix_view::{graphics::Rect, Editor};
+use helix_view::{
+    graphics::{Modifier, Rect, Style},
+    Editor,
+};
 use tui::layout::Constraint;
 
 pub trait Item {
@@ -44,6 +51,40 @@ impl Item for PathBuf {
             .unwrap_or(self)
             .to_string_lossy()
             .into()
+    }
+}
+
+pub struct DirEntry {
+    pub path: PathBuf,
+    pub metadata: std::fs::Metadata,
+}
+
+impl TryFrom<std::fs::DirEntry> for DirEntry {
+    type Error = std::io::Error;
+    fn try_from(d: std::fs::DirEntry) -> Result<DirEntry, Self::Error> {
+        Ok(DirEntry {
+            metadata: d.metadata()?,
+            path: d.path(),
+        })
+    }
+}
+
+impl Item for DirEntry {
+    type Data = PathBuf;
+
+    fn label(&self, root_path: &Self::Data) -> Spans {
+        let mut content = self
+            .path
+            .strip_prefix(&root_path)
+            .unwrap_or(&self.path)
+            .to_string_lossy();
+        let style = Style::default();
+        if self.metadata.is_dir() {
+            content.to_mut().push(std::path::MAIN_SEPARATOR);
+            style.add_modifier(Modifier::BOLD);
+        }
+        let span = Span { style, content };
+        Spans(vec![span])
     }
 }
 

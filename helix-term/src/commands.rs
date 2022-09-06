@@ -263,6 +263,7 @@ impl MappableCommand {
         append_mode, "Append after selection",
         command_mode, "Enter command mode",
         file_picker, "Open file picker",
+        file_finder, "Open file finder",
         file_picker_in_current_directory, "Open file picker at current working directory",
         code_action, "Perform code action",
         buffer_picker, "Open buffer picker",
@@ -2227,6 +2228,13 @@ fn file_picker(cx: &mut Context) {
     let root = find_root(None, &[]).unwrap_or_else(|| PathBuf::from("./"));
     let picker = ui::file_picker(root, &cx.editor.config());
     cx.push_layer(Box::new(overlayed(picker)));
+}
+
+fn file_finder(cx: &mut Context) {
+    // We don't specify language markers, root will be the root of the current git repo
+    let root = find_root(None, &[]).unwrap_or_else(|| PathBuf::from("./"));
+    let finder = ui::file_finder(root, &cx.editor.config());
+    cx.push_layer(Box::new(overlayed(finder)));
 }
 
 fn file_picker_in_current_directory(cx: &mut Context) {
