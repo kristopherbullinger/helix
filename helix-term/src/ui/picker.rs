@@ -20,6 +20,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::ui::menu::DirEntry;
 use crate::ui::{Prompt, PromptEvent};
 use helix_core::{movement::Direction, Position};
 use helix_view::{
@@ -47,7 +48,7 @@ pub struct FilePicker<T: Item> {
     file_fn: Box<dyn Fn(&Editor, &T) -> Option<FileLocation>>,
 }
 
-pub struct FileFinder<T: Item> {
+pub struct FileExplorer<T: Item> {
     picker: Picker<T>,
     pub truncate_start: bool,
     /// Caches paths to documents
@@ -59,7 +60,7 @@ pub struct FileFinder<T: Item> {
 
 pub enum CachedPreview {
     Document(Box<Document>),
-    Directory(Vec<PathBuf>),
+    Directory(Vec<DirEntry>),
     Binary,
     LargeFile,
     NotFound,
@@ -149,10 +150,19 @@ impl<T: Item> FilePicker<T> {
         }
 
         if path.is_dir() {
-            let entries = match std::fs::read_dir(path) {
-                Ok(readdir) => readdir.flatten().map(|d| d.path()).collect(),
+            let mut entries = match std::fs::read_dir(path) {
+                Ok(readdir) => readdir
+                    .flatten()
+                    .flat_map(|d| DirEntry::try_from(d))
+                    .collect(),
                 Err(_) => vec![],
             };
+            entries.sort_unstable_by(|a, b| {
+                b.metadata
+                    .is_dir()
+                    .cmp(&a.metadata.is_dir())
+                    .then(a.path.cmp(&b.path))
+            });
             let preview = CachedPreview::Directory(entries);
             self.preview_cache.insert(path.to_owned(), preview);
             return Preview::Cached(&self.preview_cache[path]);
@@ -301,7 +311,7 @@ impl<T: Item + 'static> Component for FilePicker<T> {
     }
 }
 
-impl<T: Item> FileFinder<T> {
+impl<T: Item> FileExplorer<T> {
     pub fn new(
         options: Vec<T>,
         editor_data: T::Data,
@@ -354,10 +364,19 @@ impl<T: Item> FileFinder<T> {
         }
 
         if path.is_dir() {
-            let entries = match std::fs::read_dir(path) {
-                Ok(readdir) => readdir.flatten().map(|d| d.path()).collect(),
+            let mut entries = match std::fs::read_dir(path) {
+                Ok(readdir) => readdir
+                    .flatten()
+                    .flat_map(|direntry| DirEntry::try_from(direntry))
+                    .collect(),
                 Err(_) => vec![],
             };
+            entries.sort_unstable_by(|a, b| {
+                b.metadata
+                    .is_dir()
+                    .cmp(&a.metadata.is_dir())
+                    .then(a.path.cmp(&b.path))
+            });
             let preview = CachedPreview::Directory(entries);
             self.preview_cache.insert(path.to_owned(), preview);
             return Preview::Cached(&self.preview_cache[path]);
@@ -389,7 +408,7 @@ impl<T: Item> FileFinder<T> {
     }
 }
 
-impl<T: Item + 'static> Component for FileFinder<T> {
+impl Component for FileExplorer<DirEntry> {
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         // +---------+ +---------+
         // |prompt   | |preview  |
@@ -436,11 +455,11 @@ impl<T: Item + 'static> Component for FileFinder<T> {
                 Preview::Cached(CachedPreview::Directory(entries)) => {
                     for (entry, height_offset) in entries.iter().zip(0..) {
                         let mut label = entry
-                            .as_path()
+                            .path
                             .strip_prefix(&path)
                             .expect("strip prefix")
                             .to_string_lossy();
-                        if entry.is_dir() {
+                        if entry.metadata.is_dir() {
                             label.to_mut().push(std::path::MAIN_SEPARATOR);
                         }
                         surface.set_stringn(
@@ -509,10 +528,78 @@ impl<T: Item + 'static> Component for FileFinder<T> {
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &mut Context) -> EventResult {
-        if let Event::Key(key!(Enter)) = event {
-            let selection = self.picker.selection();
+        let keyevent = match event {
+            Event::Key(k) => k,
+            _ => return self.picker.handle_event(event, ctx),
+        };
+        match keyevent {
+            key!(Enter) => {
+                if let Some(direntry) = self.picker.selection() {
+                    if direntry.metadata.is_dir() {
+                        let stripped = direntry
+                            .path
+                            .strip_prefix(&self.picker.editor_data)
+                            .expect("prefix strip");
+                        let next_fragment = stripped.components().next().expect("path fragment");
+                        let editor_data = {
+                            let mut c = self.picker.editor_data.clone();
+                            c.push(next_fragment);
+                            c
+                        };
+                        let direntry = match std::fs::read_dir(&editor_data) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                ctx.editor
+                                    .set_error(format!("failed to open {:?}", editor_data));
+                                return self.picker.handle_event(event, ctx);
+                            }
+                        };
+                        let mut options = direntry
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|d| DirEntry::try_from(d))
+                            .collect::<Vec<_>>();
+                        options.sort_unstable_by(|a, b| {
+                            b.metadata
+                                .is_dir()
+                                .cmp(&a.metadata.is_dir())
+                                .then(a.path.cmp(&b.path))
+                        });
+                        self.picker
+                            .update_options(options, editor_data, &ctx.editor);
+                        return EventResult::Consumed(None);
+                    } else {
+                        ctx.editor.open(&direntry.path, Action::Load).unwrap();
+                    }
+                }
+            }
+            ctrl!('k') if self.picker.prompt.line().is_empty() => {
+                let mut new_path = Clone::clone(&self.picker.editor_data);
+                new_path.pop();
+                let direntry = match std::fs::read_dir(&new_path) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        ctx.editor
+                            .set_error(format!("failed to open {:?}", new_path));
+                        return self.picker.handle_event(event, ctx);
+                    }
+                };
+                let mut options = direntry
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|d| DirEntry::try_from(d))
+                    .collect::<Vec<_>>();
+                options.sort_unstable_by(|a, b| {
+                    b.metadata
+                        .is_dir()
+                        .cmp(&a.metadata.is_dir())
+                        .then(a.path.cmp(&b.path))
+                });
+
+                self.picker.update_options(options, new_path, &ctx.editor);
+            }
+            _ => {}
         }
-        // TODO: keybinds for scrolling preview
         self.picker.handle_event(event, ctx)
     }
 
@@ -734,6 +821,21 @@ impl<T: Item> Picker<T> {
             self.score();
         }
         EventResult::Consumed(None)
+    }
+
+    fn update_options(&mut self, options: Vec<T>, editor_data: T::Data, editor: &Editor) {
+        self.options = options;
+        self.editor_data = editor_data;
+        self.cursor = 0;
+        self.prompt.clear(editor);
+        self.matches.clear();
+        self.matches.extend(
+            self.options
+                .iter()
+                .enumerate()
+                .map(|(index, _option)| (index, 0)),
+        );
+        self.score();
     }
 }
 

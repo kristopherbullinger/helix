@@ -16,7 +16,7 @@ pub use completion::Completion;
 pub use editor::EditorView;
 pub use markdown::Markdown;
 pub use menu::{DirEntry, Menu};
-pub use picker::{FileFinder, FileLocation, FilePicker, Picker};
+pub use picker::{FileExplorer, FileLocation, FilePicker, Picker};
 pub use popup::Popup;
 pub use prompt::{Prompt, PromptEvent};
 pub use spinner::{ProgressSpinners, Spinner};
@@ -200,7 +200,10 @@ pub fn file_picker(root: PathBuf, config: &helix_view::editor::Config) -> FilePi
     )
 }
 
-pub fn file_finder(root: PathBuf, _config: &helix_view::editor::Config) -> FileFinder<DirEntry> {
+pub fn file_explorer(
+    root: PathBuf,
+    _config: &helix_view::editor::Config,
+) -> FileExplorer<DirEntry> {
     use std::time::Instant;
 
     let now = Instant::now();
@@ -219,7 +222,7 @@ pub fn file_finder(root: PathBuf, _config: &helix_view::editor::Config) -> FileF
 
     log::debug!("file_finder init {:?}", Instant::now().duration_since(now));
 
-    FileFinder::new(
+    FileExplorer::new(
         files,
         root,
         move |cx, direntry, action| {

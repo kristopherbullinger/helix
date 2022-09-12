@@ -203,8 +203,8 @@ pub fn default() -> HashMap<Mode, Keymap> {
 
         "space" => { "Space"
             "f" => file_picker,
-            "." => file_finder,
             "F" => file_picker_in_current_directory,
+            "e" => file_explorer,
             "b" => buffer_picker,
             "j" => jumplist_picker,
             "s" => symbol_picker,
