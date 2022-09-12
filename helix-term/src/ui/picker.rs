@@ -453,7 +453,7 @@ impl Component for FileExplorer<DirEntry> {
             let preview = self.get_preview(&path, cx.editor);
             let doc = match preview {
                 Preview::Cached(CachedPreview::Directory(entries)) => {
-                    for (entry, height_offset) in entries.iter().zip(0..) {
+                    for (entry, height_offset) in entries.iter().zip(0..inner.height) {
                         let mut label = entry
                             .path
                             .strip_prefix(&path)
