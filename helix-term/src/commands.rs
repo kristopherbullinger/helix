@@ -2232,19 +2232,25 @@ fn file_picker(cx: &mut Context) {
 
 fn file_explorer(cx: &mut Context) {
     let doc = doc!(cx.editor);
-    let root = doc
-        .path()
-        .cloned()
-        .and_then(|mut p| {
-            //pop leaf node to obtain path of containing directory
-            p.pop();
-            if p.metadata().ok()?.is_dir() {
-                Some(p)
-            } else {
-                None
+    //use editor current file's directory, fall back to current dir
+    let root = match doc.path().cloned().and_then(|mut p| {
+        //pop leaf node to obtain path of containing directory
+        p.pop();
+        if p.metadata().ok()?.is_dir() {
+            Some(p)
+        } else {
+            None
+        }
+    }) {
+        Some(p) => p,
+        None => match std::fs::canonicalize("./") {
+            Ok(p) => p,
+            Err(_) => {
+                cx.editor.set_error("failed to set explorer directory");
+                return;
             }
-        })
-        .unwrap_or_else(|| PathBuf::from("./"));
+        },
+    };
     let finder = ui::file_explorer(root, &cx.editor.config());
     cx.push_layer(Box::new(overlayed(finder)));
 }
