@@ -318,7 +318,7 @@ impl<T: Item> FileExplorer<T> {
         callback_fn: impl Fn(&mut Context, &T, Action) + 'static,
         preview_fn: impl Fn(&Editor, &T) -> Option<FileLocation> + 'static,
     ) -> Self {
-        let truncate_start = true;
+        let truncate_start = false;
         let mut picker = Picker::new(options, editor_data, callback_fn);
         picker.truncate_start = truncate_start;
 
